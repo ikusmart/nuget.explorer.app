@@ -1,0 +1,86 @@
+import { useEffect } from "react";
+import { Link } from "react-router-dom";
+import { Toaster } from "@/components/ui/toaster";
+import { useServerStore } from "@/stores/server-store";
+import { setServiceIndexUrl } from "@/services/nuget-api";
+import { Button } from "@/components/ui/button";
+import { Network } from "lucide-react";
+import { ServerSelector } from "@/components/layout/ServerSelector";
+import { MigrationToolbar } from "@/components/migration/MigrationToolbar";
+import { MigrationTable } from "@/components/migration/MigrationTable";
+import { MigrationRoadmap } from "@/components/migration/MigrationRoadmap";
+import { useMigrationStore } from "@/stores/migration-store";
+
+export function MigrationPage() {
+  const serverUrl = useServerStore((state) => state.serverUrl);
+  const packages = useMigrationStore((s) => s.packages);
+  const loadingProgress = useMigrationStore((s) => s.loadingProgress);
+
+  // Sync persisted server URL to API service on app load
+  useEffect(() => {
+    setServiceIndexUrl(serverUrl);
+  }, [serverUrl]);
+
+  return (
+    <>
+      <div className="h-screen flex flex-col">
+        {/* Navigation Header */}
+        <header className="border-b px-4 py-2 flex items-center justify-between bg-background">
+          <nav className="flex gap-2">
+            <Button variant="default" size="sm" asChild>
+              <Link to="/">Migration Analysis</Link>
+            </Button>
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/graph">
+                <Network className="h-4 w-4 mr-1" />
+                Dependency Graph
+              </Link>
+            </Button>
+          </nav>
+          <ServerSelector />
+        </header>
+
+        {/* Main Content */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Toolbar */}
+          <MigrationToolbar />
+
+          {/* Loading Progress */}
+          {loadingProgress && (
+            <div className="px-4 py-2 bg-muted border-b">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 h-2 bg-muted-foreground/20 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary transition-all"
+                    style={{
+                      width: `${(loadingProgress.current / loadingProgress.total) * 100}%`,
+                    }}
+                  />
+                </div>
+                <span className="text-sm text-muted-foreground">
+                  Loading dependencies... {loadingProgress.current}/
+                  {loadingProgress.total}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Table */}
+          <div className="flex-1 overflow-auto">
+            {packages.length > 0 ? (
+              <>
+                <MigrationTable />
+                <MigrationRoadmap />
+              </>
+            ) : (
+              <div className="flex items-center justify-center h-full text-muted-foreground">
+                Enter a package prefix and click Analyze to start
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <Toaster />
+    </>
+  );
+}
