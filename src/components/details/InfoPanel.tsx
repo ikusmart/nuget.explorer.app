@@ -28,6 +28,7 @@ export function InfoPanel() {
   const addDependency = useGraphStore((s) => s.addDependency);
   const addAllDependencies = useGraphStore((s) => s.addAllDependencies);
   const isNodeOnGraph = useGraphStore((s) => s.isNodeOnGraph);
+  const toggleNodeSelection = useGraphStore((s) => s.toggleNodeSelection);
   const findPath = useGraphStore((s) => s.findPath);
   const clearPath = useGraphStore((s) => s.clearPath);
   const highlightedPath = useGraphStore((s) => s.highlightedPath);
@@ -284,10 +285,18 @@ export function InfoPanel() {
                             )}
                           </div>
                           {onGraph ? (
-                            <span className="text-xs text-green-600 flex items-center gap-1 shrink-0 ml-2">
-                              <Check className="h-3 w-3" />
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 shrink-0 ml-2 text-green-600 hover:text-green-700"
+                              onClick={() =>
+                                toggleNodeSelection(dep.id.toLowerCase(), false)
+                              }
+                              title="Select on graph"
+                            >
+                              <Check className="h-3 w-3 mr-1" />
                               on graph
-                            </span>
+                            </Button>
                           ) : (
                             <Button
                               variant="ghost"

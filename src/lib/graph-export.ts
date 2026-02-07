@@ -1,5 +1,9 @@
 import { z } from "zod";
-import type { GraphNode, GraphEdge, PackageNodeData } from "@/stores/graph-store";
+import type {
+  GraphNode,
+  GraphEdge,
+  PackageNodeData,
+} from "@/stores/graph-store";
 import type { ForceLayoutMode } from "@/lib/force-simulation";
 
 /** Schema version for future compatibility */
@@ -33,6 +37,7 @@ const EdgeSchema = z.object({
   id: z.string(),
   source: z.string(),
   target: z.string(),
+  label: z.string().optional(),
 });
 
 const GraphExportSchema = z.object({
@@ -49,7 +54,7 @@ export type GraphExport = z.infer<typeof GraphExportSchema>;
 export function exportGraph(
   nodes: GraphNode[],
   edges: GraphEdge[],
-  layoutMode: ForceLayoutMode
+  layoutMode: ForceLayoutMode,
 ): GraphExport {
   return {
     version: SCHEMA_VERSION,
@@ -76,6 +81,7 @@ export function exportGraph(
       id: e.id,
       source: e.source,
       target: e.target,
+      label: typeof e.label === "string" ? e.label : undefined,
     })),
   };
 }
@@ -106,6 +112,7 @@ export function importEdges(data: GraphExport): GraphEdge[] {
     id: e.id,
     source: e.source,
     target: e.target,
+    label: e.label,
     animated: false,
   }));
 }
@@ -129,7 +136,9 @@ export function downloadGraphExport(data: GraphExport): void {
 }
 
 /** Read file and parse as graph export */
-export async function readGraphExportFile(file: File): Promise<GraphExport | null> {
+export async function readGraphExportFile(
+  file: File,
+): Promise<GraphExport | null> {
   try {
     const text = await file.text();
     const json = JSON.parse(text);

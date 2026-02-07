@@ -8,8 +8,18 @@ import type {
   Dependency,
   DependencyGroup,
 } from "@/types/nuget";
+import {
+  cacheGet,
+  cacheSet,
+  cacheClear,
+  cacheGetAllByPrefix,
+  getCacheServiceStats,
+} from "./cache-service";
 
 let serviceIndexUrl = "https://api.nuget.org/v3/index.json";
+
+/** Cache-only mode flag */
+let cacheOnlyMode = false;
 
 /** Check if we're in development mode */
 const isDev = import.meta.env.DEV;
@@ -29,10 +39,21 @@ export function getServiceIndexUrl(): string {
   return serviceIndexUrl;
 }
 
-/** Set the service index URL and clear cache */
+/** Set the service index URL and clear cache only if URL actually changed */
 export function setServiceIndexUrl(url: string): void {
+  if (url === serviceIndexUrl) return;
   serviceIndexUrl = url;
   clearCache();
+}
+
+/** Enable or disable cache-only mode */
+export function setCacheOnlyMode(enabled: boolean): void {
+  cacheOnlyMode = enabled;
+}
+
+/** Get current cache-only mode state */
+export function getCacheOnlyMode(): boolean {
+  return cacheOnlyMode;
 }
 
 /** Validate that a URL is a valid NuGet V3 server */
@@ -79,23 +100,6 @@ export async function validateServiceIndex(
   }
 }
 
-/** Cache for API responses */
-const cache = new Map<string, { data: unknown; timestamp: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-function getCached<T>(key: string): T | null {
-  const entry = cache.get(key);
-  if (entry && Date.now() - entry.timestamp < CACHE_TTL) {
-    return entry.data as T;
-  }
-  cache.delete(key);
-  return null;
-}
-
-function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, timestamp: Date.now() });
-}
-
 /** Service URLs discovered from index */
 let serviceUrls: {
   searchQueryService?: string;
@@ -107,11 +111,13 @@ let serviceUrls: {
 async function discoverServices(): Promise<void> {
   if (serviceUrls.searchQueryService) return;
 
-  const cached = getCached<typeof serviceUrls>("serviceUrls");
+  const cached = cacheGet<typeof serviceUrls>("serviceUrls");
   if (cached) {
     serviceUrls = cached;
     return;
   }
+
+  if (cacheOnlyMode) return;
 
   const response = await proxyFetch(serviceIndexUrl);
   if (!response.ok) {
@@ -132,7 +138,7 @@ async function discoverServices(): Promise<void> {
     }
   }
 
-  setCache("serviceUrls", serviceUrls);
+  cacheSet("serviceUrls", serviceUrls);
 }
 
 /** Search for packages */
@@ -142,15 +148,35 @@ export async function searchPackages(
   take = 20,
   includePrerelease = false,
 ): Promise<SearchResult[]> {
+  const cacheKey = `search:${query}:${skip}:${take}:${includePrerelease}`;
+  const cached = cacheGet<SearchResult[]>(cacheKey);
+  if (cached) return cached;
+
+  if (cacheOnlyMode) {
+    // In cache-only mode, scan all cached search results and filter locally
+    const allCached = cacheGetAllByPrefix<SearchResult[]>("search:");
+    const queryLower = query.toLowerCase();
+    const merged: SearchResult[] = [];
+    const seen = new Set<string>();
+
+    for (const entry of allCached) {
+      for (const result of entry.data) {
+        const idLower = result.id.toLowerCase();
+        if (!seen.has(idLower) && idLower.includes(queryLower)) {
+          seen.add(idLower);
+          merged.push(result);
+        }
+      }
+    }
+
+    return merged.slice(skip, skip + take);
+  }
+
   await discoverServices();
 
   if (!serviceUrls.searchQueryService) {
     throw new Error("Search service not available");
   }
-
-  const cacheKey = `search:${query}:${skip}:${take}:${includePrerelease}`;
-  const cached = getCached<SearchResult[]>(cacheKey);
-  if (cached) return cached;
 
   const url = new URL(serviceUrls.searchQueryService);
   url.searchParams.set("q", query);
@@ -165,22 +191,24 @@ export async function searchPackages(
   }
 
   const data: SearchResponse = await response.json();
-  setCache(cacheKey, data.data);
+  cacheSet(cacheKey, data.data);
   return data.data;
 }
 
 /** Get all versions of a package */
 export async function getPackageVersions(packageId: string): Promise<string[]> {
+  const idLower = packageId.toLowerCase();
+  const cacheKey = `versions:${idLower}`;
+  const cached = cacheGet<string[]>(cacheKey);
+  if (cached) return cached;
+
+  if (cacheOnlyMode) return [];
+
   await discoverServices();
 
   if (!serviceUrls.packageBaseAddress) {
     throw new Error("Package base address not available");
   }
-
-  const idLower = packageId.toLowerCase();
-  const cacheKey = `versions:${idLower}`;
-  const cached = getCached<string[]>(cacheKey);
-  if (cached) return cached;
 
   const url = `${serviceUrls.packageBaseAddress}${idLower}/index.json`;
   const response = await proxyFetch(url);
@@ -191,7 +219,7 @@ export async function getPackageVersions(packageId: string): Promise<string[]> {
   const data: VersionsResponse = await response.json();
   // Return versions in descending order (newest first)
   const versions = data.versions.reverse();
-  setCache(cacheKey, versions);
+  cacheSet(cacheKey, versions);
   return versions;
 }
 
@@ -200,17 +228,21 @@ export async function getPackageDetails(
   packageId: string,
   version: string,
 ): Promise<PackageDetails> {
+  const idLower = packageId.toLowerCase();
+  const versionLower = version.toLowerCase();
+  const cacheKey = `details:${idLower}:${versionLower}`;
+  const cached = cacheGet<PackageDetails>(cacheKey);
+  if (cached) return cached;
+
+  if (cacheOnlyMode) {
+    throw new Error(`Package ${packageId}@${version} not in cache`);
+  }
+
   await discoverServices();
 
   if (!serviceUrls.registrationsBaseUrl) {
     throw new Error("Registration service not available");
   }
-
-  const idLower = packageId.toLowerCase();
-  const versionLower = version.toLowerCase();
-  const cacheKey = `details:${idLower}:${versionLower}`;
-  const cached = getCached<PackageDetails>(cacheKey);
-  if (cached) return cached;
 
   // Step 1: Fetch registration index
   const indexUrl = `${serviceUrls.registrationsBaseUrl}${idLower}/index.json`;
@@ -315,7 +347,7 @@ export async function getPackageDetails(
   };
 
   console.log("Parsed details:", details);
-  setCache(cacheKey, details);
+  cacheSet(cacheKey, details);
   return details;
 }
 
@@ -389,14 +421,11 @@ export function flattenDependencies(details: PackageDetails): FlatDependency[] {
 
 /** Clear the cache */
 export function clearCache(): void {
-  cache.clear();
+  cacheClear();
   serviceUrls = {};
 }
 
 /** Get cache stats */
 export function getCacheStats(): { size: number; keys: string[] } {
-  return {
-    size: cache.size,
-    keys: Array.from(cache.keys()),
-  };
+  return getCacheServiceStats();
 }

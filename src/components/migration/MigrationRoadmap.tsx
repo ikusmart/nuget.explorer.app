@@ -46,13 +46,6 @@ function pickVersion(pkg: MigrationPackage, devFilter: string): string {
 const statusEmoji = (status: "ready" | "partial" | "blocked") =>
   status === "ready" ? "🟢" : status === "partial" ? "🟡" : "🔴";
 
-const statusLabel = (status: "ready" | "partial" | "blocked") =>
-  status === "ready"
-    ? "[READY]"
-    : status === "partial"
-      ? "[PARTIAL]"
-      : "[BLOCKED]";
-
 function formatVersion(current: string, latest: string): string {
   return current === latest ? latest : `${current} -> ${latest}`;
 }

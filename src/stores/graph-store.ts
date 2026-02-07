@@ -105,11 +105,16 @@ function createPlaceholderNode(
 }
 
 /** Create an edge between two nodes */
-function createEdge(sourceId: string, targetId: string): GraphEdge {
+function createEdge(
+  sourceId: string,
+  targetId: string,
+  versionRange?: string,
+): GraphEdge {
   return {
     id: `${sourceId}->${targetId}`,
     source: sourceId,
     target: targetId,
+    label: versionRange,
     animated: false,
   };
 }
@@ -141,6 +146,7 @@ interface GraphState {
   removeSelectedNodes: () => void;
   toggleNodeSelection: (id: string, additive: boolean) => void;
   selectNodes: (ids: string[]) => void;
+  selectAllNodes: () => void;
   clearSelection: () => void;
   selectDependencies: (nodeId: string) => void;
   expandDependency: (placeholderId: string, details: PackageDetails) => void;
@@ -154,6 +160,10 @@ interface GraphState {
   setForceLayoutMode: (mode: ForceLayoutMode) => void;
   setClusterStrategy: (strategy: ClusterStrategy) => void;
   runForceLayout: (width: number, height: number) => void;
+  computeLayout: (
+    width: number,
+    height: number,
+  ) => Map<string, { x: number; y: number }>;
   applyFilter: () => void;
   resetFilter: () => void;
   getVisibleNodes: () => GraphNode[];
@@ -280,7 +290,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         !state.edges.some((e) => e.id === edgeId) &&
         !newEdges.some((e) => e.id === edgeId)
       ) {
-        newEdges.push(createEdge(nodeId, depNodeId));
+        newEdges.push(createEdge(nodeId, depNodeId, dep.versionRange));
       }
     });
 
@@ -303,7 +313,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       // Just add edge if missing
       const edgeId = `${parentNodeId}->${depNodeId}`;
       if (!state.edges.some((e) => e.id === edgeId)) {
-        set({ edges: [...state.edges, createEdge(parentNodeId, depNodeId)] });
+        set({
+          edges: [
+            ...state.edges,
+            createEdge(parentNodeId, depNodeId, dep.versionRange),
+          ],
+        });
       }
       return;
     }
@@ -319,7 +334,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       existingEdgesFromParent,
     );
     const newNode = createPlaceholderNode(dep, position);
-    const newEdge = createEdge(parentNodeId, depNodeId);
+    const newEdge = createEdge(parentNodeId, depNodeId, dep.versionRange);
 
     set({
       nodes: [...state.nodes, newNode],
@@ -361,7 +376,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         !state.edges.some((e) => e.id === edgeId) &&
         !newEdges.some((e) => e.id === edgeId)
       ) {
-        newEdges.push(createEdge(parentNodeId, depNodeId));
+        newEdges.push(createEdge(parentNodeId, depNodeId, dep.versionRange));
       }
     });
 
@@ -423,6 +438,12 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     set({ selectedNodeIds: new Set(ids) });
   },
 
+  selectAllNodes: () => {
+    const state = get();
+    const visibleIds = state.getVisibleNodes().map((n) => n.id);
+    set({ selectedNodeIds: new Set(visibleIds) });
+  },
+
   clearSelection: () => {
     set({ selectedNodeIds: new Set() });
   },
@@ -474,7 +495,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         !state.edges.some((e) => e.id === edgeId) &&
         !newEdges.some((e) => e.id === edgeId)
       ) {
-        newEdges.push(createEdge(resolvedNode.id, depNodeId));
+        newEdges.push(createEdge(resolvedNode.id, depNodeId, dep.versionRange));
       }
     });
 
@@ -618,6 +639,70 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       clusters,
       clusterInfos,
     });
+  },
+
+  computeLayout: (width: number, height: number) => {
+    const state = get();
+    const visibleNodes = state.getVisibleNodes();
+    const visibleEdges = state.getVisibleEdges();
+
+    if (visibleNodes.length === 0) return new Map();
+
+    const clusters = computeClusters(
+      visibleNodes,
+      visibleEdges,
+      state.clusterStrategy,
+    );
+    const clusterInfos = getClusterInfos(clusters);
+    const clusterCenters = calculateClusterCenters(clusters, width, height);
+    const nodeDepths = computeNodeDepths(visibleNodes, visibleEdges);
+
+    const rootNodes = visibleNodes.filter(
+      (n) => !visibleEdges.some((e) => e.target === n.id),
+    );
+    const centerNodeId = rootNodes[0]?.id ?? visibleNodes[0]?.id;
+
+    const simNodes: SimNode[] = visibleNodes.map((n) => ({
+      id: n.id,
+      x: n.position.x,
+      y: n.position.y,
+      clusterId: clusters.get(n.id),
+      depth: nodeDepths.get(n.id),
+    }));
+
+    const simLinks: SimLink[] = visibleEdges.map((e) => ({
+      source: e.source,
+      target: e.target,
+    }));
+
+    const simulation = createSimulation(
+      simNodes,
+      simLinks,
+      state.forceLayoutMode,
+      { width, height, clusters, clusterCenters, nodeDepths, centerNodeId },
+    );
+
+    runSimulationSync(simulation, 300);
+    const positions = getNodePositions(simulation);
+    stopSimulation(simulation);
+
+    // Update only cluster info on nodes (not positions)
+    const updatedNodes = state.nodes.map((node) => {
+      const clusterId = clusters.get(node.id);
+      const clusterInfo = clusterId ? clusterInfos.get(clusterId) : undefined;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          clusterId,
+          clusterColor: clusterInfo?.color,
+        },
+      };
+    });
+
+    set({ nodes: updatedNodes, clusters, clusterInfos });
+
+    return positions;
   },
 
   applyFilter: () => {

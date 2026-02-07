@@ -22,6 +22,7 @@ interface MigrationState {
   // Data
   packages: MigrationPackage[];
   loadingProgress: { current: number; total: number } | null;
+  error: string | null;
 
   // Analysis results
   versionConflicts: VersionConflict[];
@@ -44,6 +45,7 @@ export const useMigrationStore = create<MigrationState>((set, get) => ({
   devVersionFilter: "",
   packages: [],
   loadingProgress: null,
+  error: null,
   versionConflicts: [],
   migrationOrder: [],
 
@@ -61,14 +63,21 @@ export const useMigrationStore = create<MigrationState>((set, get) => ({
 
     if (!searchPrefix) return;
 
-    set({ loadingProgress: { current: 0, total: 1 }, packages: [] });
+    set({
+      loadingProgress: { current: 0, total: 1 },
+      packages: [],
+      error: null,
+    });
 
     try {
       // Step 1: Search for packages by prefix
       const packageIds = await searchByPrefix(searchPrefix);
 
       if (packageIds.length === 0) {
-        set({ loadingProgress: null });
+        set({
+          loadingProgress: null,
+          error: `No packages found matching "${searchPrefix}"`,
+        });
         return;
       }
 
@@ -112,7 +121,10 @@ export const useMigrationStore = create<MigrationState>((set, get) => ({
       });
     } catch (error) {
       console.error("Analysis failed:", error);
-      set({ loadingProgress: null });
+      set({
+        loadingProgress: null,
+        error: error instanceof Error ? error.message : "Analysis failed",
+      });
     }
   },
 
@@ -123,6 +135,7 @@ export const useMigrationStore = create<MigrationState>((set, get) => ({
       devVersionFilter: "",
       packages: [],
       loadingProgress: null,
+      error: null,
       versionConflicts: [],
       migrationOrder: [],
     });

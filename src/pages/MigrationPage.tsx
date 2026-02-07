@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Toaster } from "@/components/ui/toaster";
 import { useServerStore } from "@/stores/server-store";
-import { setServiceIndexUrl } from "@/services/nuget-api";
+import { setServiceIndexUrl, setCacheOnlyMode } from "@/services/nuget-api";
 import { Button } from "@/components/ui/button";
 import { Network } from "lucide-react";
 import { ServerSelector } from "@/components/layout/ServerSelector";
@@ -13,13 +13,20 @@ import { useMigrationStore } from "@/stores/migration-store";
 
 export function MigrationPage() {
   const serverUrl = useServerStore((state) => state.serverUrl);
+  const cacheOnly = useServerStore((state) => state.cacheOnly);
   const packages = useMigrationStore((s) => s.packages);
   const loadingProgress = useMigrationStore((s) => s.loadingProgress);
+  const error = useMigrationStore((s) => s.error);
 
   // Sync persisted server URL to API service on app load
   useEffect(() => {
     setServiceIndexUrl(serverUrl);
   }, [serverUrl]);
+
+  // Sync cache-only mode
+  useEffect(() => {
+    setCacheOnlyMode(cacheOnly);
+  }, [cacheOnly]);
 
   return (
     <>
@@ -62,6 +69,13 @@ export function MigrationPage() {
                   {loadingProgress.total}
                 </span>
               </div>
+            </div>
+          )}
+
+          {/* Error */}
+          {error && (
+            <div className="px-4 py-2 bg-destructive/10 border-b text-destructive text-sm">
+              Analysis failed: {error}
             </div>
           )}
 

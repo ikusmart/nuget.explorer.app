@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { useSearch, useVersions, usePackageDetails } from "@/hooks/use-nuget";
 import { useGraphStore } from "@/stores/graph-store";
+import { useServerStore } from "@/stores/server-store";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, Plus, FileCode } from "lucide-react";
 import type { SearchResult } from "@/types/nuget";
@@ -30,6 +31,9 @@ export function SearchPanel() {
   >([]);
   const [csprojDialogOpen, setCsprojDialogOpen] = useState(false);
   const csprojInputRef = useRef<HTMLInputElement>(null);
+
+  const cacheOnly = useServerStore((s) => s.cacheOnly);
+  const setCacheOnly = useServerStore((s) => s.setCacheOnly);
 
   const {
     results,
@@ -180,6 +184,15 @@ export function SearchPanel() {
             className="hidden"
           />
         </div>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="checkbox"
+            checked={cacheOnly}
+            onChange={(e) => setCacheOnly(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          <span className="text-muted-foreground">Cache only</span>
+        </label>
       </div>
 
       {/* CSProj Import Dialog */}
@@ -188,6 +201,30 @@ export function SearchPanel() {
         onOpenChange={setCsprojDialogOpen}
         packages={csprojPackages}
       />
+
+      {/* Version Selector & Add Button — placed above results for quick access */}
+      {selectedPackage && (
+        <div className="p-4 border-b space-y-3">
+          <VersionSelector
+            versions={versions}
+            selectedVersion={selectedVersion}
+            onVersionSelect={handleVersionSelect}
+            loading={versionsLoading}
+          />
+          <Button
+            className="w-full"
+            onClick={handleAddToGraph}
+            disabled={!details || detailsLoading}
+          >
+            {detailsLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            ) : (
+              <Plus className="h-4 w-4 mr-2" />
+            )}
+            Add to Graph
+          </Button>
+        </div>
+      )}
 
       {/* Results */}
       <ScrollArea className="flex-1">
@@ -220,30 +257,6 @@ export function SearchPanel() {
           ))}
         </div>
       </ScrollArea>
-
-      {/* Version Selector & Add Button */}
-      {selectedPackage && (
-        <div className="p-4 border-t space-y-3">
-          <VersionSelector
-            versions={versions}
-            selectedVersion={selectedVersion}
-            onVersionSelect={handleVersionSelect}
-            loading={versionsLoading}
-          />
-          <Button
-            className="w-full"
-            onClick={handleAddToGraph}
-            disabled={!details || detailsLoading}
-          >
-            {detailsLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin mr-2" />
-            ) : (
-              <Plus className="h-4 w-4 mr-2" />
-            )}
-            Add to Graph
-          </Button>
-        </div>
-      )}
     </div>
   );
 }

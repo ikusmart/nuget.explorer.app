@@ -9,6 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useMigrationStore } from "@/stores/migration-store";
+import { useServerStore } from "@/stores/server-store";
 import { TARGET_FRAMEWORKS, type TargetFramework } from "@/types/migration";
 import {
   clearMigrationCache,
@@ -29,6 +30,9 @@ export function MigrationToolbar() {
   const setDevVersionFilter = useMigrationStore((s) => s.setDevVersionFilter);
   const startAnalysis = useMigrationStore((s) => s.startAnalysis);
   const reset = useMigrationStore((s) => s.reset);
+
+  const cacheOnly = useServerStore((s) => s.cacheOnly);
+  const setCacheOnly = useServerStore((s) => s.setCacheOnly);
 
   const [cacheSize, setCacheSize] = useState(
     () => getMigrationCacheStats().size,
@@ -126,6 +130,20 @@ export function MigrationToolbar() {
           disabled={isLoading}
         />
       </div>
+
+      {/* Cache Only Toggle */}
+      <label className="flex items-center gap-2 text-sm cursor-pointer">
+        <input
+          type="checkbox"
+          checked={cacheOnly}
+          onChange={(e) => setCacheOnly(e.target.checked)}
+          className="rounded border-gray-300"
+          disabled={isLoading}
+        />
+        <span className="text-muted-foreground whitespace-nowrap">
+          Cache only
+        </span>
+      </label>
 
       {/* Actions */}
       <div className="flex items-center gap-2 ml-auto">

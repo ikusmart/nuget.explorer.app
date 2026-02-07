@@ -8,6 +8,7 @@ import {
   getPackageVersions,
   getPackageDetails,
 } from "./nuget-api";
+import { cacheGet, cacheSet, getCacheServiceStats } from "./cache-service";
 
 /**
  * Cache for loaded package data
@@ -19,23 +20,16 @@ interface CachedPackageData {
   availableVersions: string[];
   targetFrameworks: string[];
   dependencyIds: Array<{ id: string; version?: string }>;
-  timestamp: number;
 }
 
-const packageCache = new Map<string, CachedPackageData>();
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
-
-/** Clear the migration package cache */
+/** Clear the migration package cache (no-op — shared cache cleared via nuget-api) */
 export function clearMigrationCache(): void {
-  packageCache.clear();
+  // Cache is shared via cache-service, cleared from nuget-api.clearCache()
 }
 
 /** Get cache stats */
 export function getMigrationCacheStats(): { size: number; keys: string[] } {
-  return {
-    size: packageCache.size,
-    keys: Array.from(packageCache.keys()),
-  };
+  return getCacheServiceStats();
 }
 
 /**
@@ -43,6 +37,10 @@ export function getMigrationCacheStats(): { size: number; keys: string[] } {
  * Returns all package IDs that start with the given prefix
  */
 export async function searchByPrefix(prefix: string): Promise<string[]> {
+  const prefixCacheKey = `migration-prefix:${prefix.toLowerCase()}`;
+  const cached = cacheGet<string[]>(prefixCacheKey);
+  if (cached) return cached;
+
   const results: string[] = [];
   const normalizedPrefix = prefix.toLowerCase();
   let skip = 0;
@@ -71,6 +69,7 @@ export async function searchByPrefix(prefix: string): Promise<string[]> {
     }
   }
 
+  cacheSet(prefixCacheKey, results);
   return results;
 }
 
@@ -132,9 +131,8 @@ export async function loadDependencyTree(
     inProgress.add(cacheKey);
 
     try {
-      const cachedData = packageCache.get(cacheKey);
-      const now = Date.now();
-      const useCache = cachedData && now - cachedData.timestamp < CACHE_TTL;
+      const cachedData = cacheGet<CachedPackageData>(`migration:${cacheKey}`);
+      const useCache = !!cachedData;
 
       let version: string;
       let versions: string[];
@@ -207,14 +205,13 @@ export async function loadDependencyTree(
         }
 
         // Save to cache
-        packageCache.set(cacheKey, {
+        cacheSet(`migration:${cacheKey}`, {
           id: packageId,
           version,
           availableVersions: versions.slice(0, 10),
           targetFrameworks,
           dependencyIds,
-          timestamp: now,
-        });
+        } satisfies CachedPackageData);
       }
 
       // Create package entry
