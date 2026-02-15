@@ -14,6 +14,10 @@ import {
   cacheClear,
   cacheGetAllByPrefix,
   getCacheServiceStats,
+  downloadCacheExport,
+  readCacheImportFile,
+  saveDefaultSnapshot,
+  loadDefaultSnapshot,
 } from "./cache-service";
 
 let serviceIndexUrl = "https://api.nuget.org/v3/index.json";
@@ -429,3 +433,10 @@ export function clearCache(): void {
 export function getCacheStats(): { size: number; keys: string[] } {
   return getCacheServiceStats();
 }
+
+export {
+  downloadCacheExport,
+  readCacheImportFile,
+  saveDefaultSnapshot,
+  loadDefaultSnapshot,
+};

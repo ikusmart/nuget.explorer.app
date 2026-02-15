@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -15,7 +15,12 @@ import {
   clearMigrationCache,
   getMigrationCacheStats,
 } from "@/services/migration-analyzer";
-import { Search, RotateCcw, Trash2 } from "lucide-react";
+import {
+  downloadCacheExport,
+  readCacheImportFile,
+  saveDefaultSnapshot,
+} from "@/services/nuget-api";
+import { Search, RotateCcw, Trash2, Download, Upload } from "lucide-react";
 
 export function MigrationToolbar() {
   const searchPrefix = useMigrationStore((s) => s.searchPrefix);
@@ -34,10 +39,34 @@ export function MigrationToolbar() {
   const cacheOnly = useServerStore((s) => s.cacheOnly);
   const setCacheOnly = useServerStore((s) => s.setCacheOnly);
 
+  const cacheFileRef = useRef<HTMLInputElement>(null);
+
   const [cacheSize, setCacheSize] = useState(
     () => getMigrationCacheStats().size,
   );
   const isLoading = loadingProgress !== null;
+
+  const handleSaveCache = () => {
+    downloadCacheExport();
+    saveDefaultSnapshot();
+  };
+
+  const handleLoadCacheFile = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const count = await readCacheImportFile(file);
+      saveDefaultSnapshot();
+      setCacheSize(getMigrationCacheStats().size);
+      console.log(`Imported ${count} cache entries`);
+    } catch (err) {
+      console.error("Failed to import cache:", err);
+    }
+    // Reset so the same file can be re-selected
+    e.target.value = "";
+  };
 
   const handleAnalyze = () => {
     if (!isLoading && searchPrefix) {
@@ -155,6 +184,31 @@ export function MigrationToolbar() {
           <RotateCcw className="h-4 w-4 mr-1" />
           Reset
         </Button>
+        <Button
+          variant="ghost"
+          onClick={handleSaveCache}
+          disabled={isLoading || cacheSize === 0}
+          title="Save cache to file"
+        >
+          <Download className="h-4 w-4 mr-1" />
+          Save
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => cacheFileRef.current?.click()}
+          disabled={isLoading}
+          title="Load cache from file"
+        >
+          <Upload className="h-4 w-4 mr-1" />
+          Load
+        </Button>
+        <input
+          ref={cacheFileRef}
+          type="file"
+          accept=".json"
+          className="hidden"
+          onChange={handleLoadCacheFile}
+        />
         <Button
           variant="ghost"
           onClick={handleClearCache}

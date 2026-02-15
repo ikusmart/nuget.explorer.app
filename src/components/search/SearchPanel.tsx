@@ -9,13 +9,19 @@ import { useSearch, useVersions, usePackageDetails } from "@/hooks/use-nuget";
 import { useGraphStore } from "@/stores/graph-store";
 import { useServerStore } from "@/stores/server-store";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Plus, FileCode } from "lucide-react";
+import { Loader2, Plus, FileCode, Download, Upload } from "lucide-react";
 import type { SearchResult } from "@/types/nuget";
 import {
   readCsprojFile,
   isCsprojFile,
   type ParsedPackageReference,
 } from "@/lib/csproj-parser";
+import {
+  downloadCacheExport,
+  readCacheImportFile,
+  saveDefaultSnapshot,
+  getCacheStats,
+} from "@/services/nuget-api";
 
 export function SearchPanel() {
   const [selectedPackage, setSelectedPackage] = useState<SearchResult | null>(
@@ -31,6 +37,8 @@ export function SearchPanel() {
   >([]);
   const [csprojDialogOpen, setCsprojDialogOpen] = useState(false);
   const csprojInputRef = useRef<HTMLInputElement>(null);
+
+  const cacheFileRef = useRef<HTMLInputElement>(null);
 
   const cacheOnly = useServerStore((s) => s.cacheOnly);
   const setCacheOnly = useServerStore((s) => s.setCacheOnly);
@@ -151,6 +159,35 @@ export function SearchPanel() {
     [toast],
   );
 
+  const handleSaveCache = useCallback(() => {
+    downloadCacheExport();
+    saveDefaultSnapshot();
+  }, []);
+
+  const handleLoadCacheFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const count = await readCacheImportFile(file);
+        saveDefaultSnapshot();
+        toast({
+          title: "Cache loaded",
+          description: `Imported ${count} entries`,
+        });
+      } catch (err) {
+        toast({
+          title: "Import failed",
+          description:
+            err instanceof Error ? err.message : "Invalid cache file",
+          variant: "destructive",
+        });
+      }
+      e.target.value = "";
+    },
+    [toast],
+  );
+
   return (
     <div className="flex flex-col h-full">
       {/* Search Input */}
@@ -184,15 +221,45 @@ export function SearchPanel() {
             className="hidden"
           />
         </div>
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <input
-            type="checkbox"
-            checked={cacheOnly}
-            onChange={(e) => setCacheOnly(e.target.checked)}
-            className="rounded border-gray-300"
-          />
-          <span className="text-muted-foreground">Cache only</span>
-        </label>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={cacheOnly}
+              onChange={(e) => setCacheOnly(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            <span className="text-muted-foreground">Cache only</span>
+          </label>
+          <div className="ml-auto flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              onClick={handleSaveCache}
+              disabled={getCacheStats().size === 0}
+              title="Save cache to file"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              onClick={() => cacheFileRef.current?.click()}
+              title="Load cache from file"
+            >
+              <Upload className="h-3.5 w-3.5" />
+            </Button>
+            <input
+              ref={cacheFileRef}
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={handleLoadCacheFile}
+            />
+          </div>
+        </div>
       </div>
 
       {/* CSProj Import Dialog */}
