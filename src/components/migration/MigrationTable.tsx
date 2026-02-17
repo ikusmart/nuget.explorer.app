@@ -17,6 +17,7 @@ import { ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 export function MigrationTable() {
   const packages = useMigrationStore((s) => s.packages);
   const versionConflicts = useMigrationStore((s) => s.versionConflicts);
+  const frameworkSelection = useMigrationStore((s) => s.frameworkSelection);
 
   const [expanded, setExpanded] = useState<ExpandedState>({});
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -45,8 +46,12 @@ export function MigrationTable() {
   }, [packages, expanded]);
 
   const columns = useMemo(
-    () => createColumns({ versionConflicts }),
-    [versionConflicts],
+    () =>
+      createColumns({
+        versionConflicts,
+        currentFrameworks: frameworkSelection.currentFrameworks,
+      }),
+    [versionConflicts, frameworkSelection.currentFrameworks],
   );
 
   const table = useReactTable({
@@ -64,11 +69,12 @@ export function MigrationTable() {
     getSortedRowModel: getSortedRowModel(),
   });
 
-  // Calculate heatmap color based on blocker count
-  const getRowHeatmapClass = (blockerCount: number): string => {
-    if (blockerCount === 0) return "";
-    if (blockerCount <= 2) return "bg-red-50 dark:bg-red-950/30";
-    if (blockerCount <= 5) return "bg-red-100 dark:bg-red-900/40";
+  // Calculate heatmap color based on status and blocker count
+  const getRowHeatmapClass = (pkg: MigrationPackage): string => {
+    if (pkg.status === "split") return "bg-blue-50 dark:bg-blue-950/30";
+    if (pkg.blockerCount === 0) return "";
+    if (pkg.blockerCount <= 2) return "bg-red-50 dark:bg-red-950/30";
+    if (pkg.blockerCount <= 5) return "bg-red-100 dark:bg-red-900/40";
     return "bg-red-200 dark:bg-red-800/50";
   };
 
@@ -128,7 +134,7 @@ export function MigrationTable() {
               key={row.id}
               className={cn(
                 "border-t hover:bg-muted/50 transition-colors",
-                getRowHeatmapClass(row.original.blockerCount),
+                getRowHeatmapClass(row.original),
               )}
             >
               {row.getVisibleCells().map((cell) => (

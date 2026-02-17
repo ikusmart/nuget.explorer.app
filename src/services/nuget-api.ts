@@ -20,6 +20,9 @@ import {
   loadDefaultSnapshot,
 } from "./cache-service";
 
+/** Deduplicates concurrent requests for the same cache key */
+const inflightRequests = new Map<string, Promise<unknown>>();
+
 let serviceIndexUrl = "https://api.nuget.org/v3/index.json";
 
 /** Cache-only mode flag */
@@ -111,6 +114,20 @@ let serviceUrls: {
   packageBaseAddress?: string;
 } = {};
 
+/** Check if an error is a network/connectivity issue */
+function isNetworkError(err: unknown): boolean {
+  if (err instanceof TypeError && /fetch|network/i.test(err.message))
+    return true;
+  if (
+    err instanceof Error &&
+    /failed to fetch|networkerror|econnrefused|enotfound|timeout|abort/i.test(
+      err.message,
+    )
+  )
+    return true;
+  return false;
+}
+
 /** Discover service URLs from index */
 async function discoverServices(): Promise<void> {
   if (serviceUrls.searchQueryService) return;
@@ -123,26 +140,36 @@ async function discoverServices(): Promise<void> {
 
   if (cacheOnlyMode) return;
 
-  const response = await proxyFetch(serviceIndexUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch service index: ${response.status}`);
-  }
-
-  const index: ServiceIndex = await response.json();
-
-  // Find required services
-  for (const resource of index.resources) {
-    const type = resource["@type"];
-    if (type.includes("SearchQueryService")) {
-      serviceUrls.searchQueryService = resource["@id"];
-    } else if (type.includes("RegistrationsBaseUrl")) {
-      serviceUrls.registrationsBaseUrl = resource["@id"];
-    } else if (type.includes("PackageBaseAddress")) {
-      serviceUrls.packageBaseAddress = resource["@id"];
+  try {
+    const response = await proxyFetch(serviceIndexUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch service index: ${response.status}`);
     }
-  }
 
-  cacheSet("serviceUrls", serviceUrls);
+    const index: ServiceIndex = await response.json();
+
+    // Find required services
+    for (const resource of index.resources) {
+      const type = resource["@type"];
+      if (type.includes("SearchQueryService")) {
+        serviceUrls.searchQueryService = resource["@id"];
+      } else if (type.includes("RegistrationsBaseUrl")) {
+        serviceUrls.registrationsBaseUrl = resource["@id"];
+      } else if (type.includes("PackageBaseAddress")) {
+        serviceUrls.packageBaseAddress = resource["@id"];
+      }
+    }
+
+    cacheSet("serviceUrls", serviceUrls);
+  } catch (err) {
+    if (isNetworkError(err)) {
+      // Server unreachable — silently switch to cache-only for this session
+      console.warn("NuGet server unreachable, falling back to cache-only mode");
+      cacheOnlyMode = true;
+      return;
+    }
+    throw err;
+  }
 }
 
 /** Search for packages */
@@ -208,23 +235,51 @@ export async function getPackageVersions(packageId: string): Promise<string[]> {
 
   if (cacheOnlyMode) return [];
 
+  const inflight = inflightRequests.get(cacheKey);
+  if (inflight) return inflight as Promise<string[]>;
+
+  const promise = getPackageVersionsImpl(idLower, cacheKey);
+  inflightRequests.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightRequests.delete(cacheKey);
+  }
+}
+
+async function getPackageVersionsImpl(
+  idLower: string,
+  cacheKey: string,
+): Promise<string[]> {
   await discoverServices();
 
+  if (cacheOnlyMode) return [];
+
   if (!serviceUrls.packageBaseAddress) {
-    throw new Error("Package base address not available");
+    return [];
   }
 
-  const url = `${serviceUrls.packageBaseAddress}${idLower}/index.json`;
-  const response = await proxyFetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch versions: ${response.status}`);
-  }
+  try {
+    const url = `${serviceUrls.packageBaseAddress}${idLower}/index.json`;
+    const response = await proxyFetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch versions: ${response.status}`);
+    }
 
-  const data: VersionsResponse = await response.json();
-  // Return versions in descending order (newest first)
-  const versions = data.versions.reverse();
-  cacheSet(cacheKey, versions);
-  return versions;
+    const data: VersionsResponse = await response.json();
+    // Return versions in descending order (newest first)
+    const versions = data.versions.reverse();
+    cacheSet(cacheKey, versions);
+    return versions;
+  } catch (err) {
+    if (isNetworkError(err)) {
+      console.warn(
+        `Network error fetching versions for ${idLower}, returning empty`,
+      );
+      return [];
+    }
+    throw err;
+  }
 }
 
 /** Get package details */
@@ -239,10 +294,33 @@ export async function getPackageDetails(
   if (cached) return cached;
 
   if (cacheOnlyMode) {
-    throw new Error(`Package ${packageId}@${version} not in cache`);
+    throw new Error(`Package ${packageId}@${version} not in cache (offline)`);
   }
 
+  const inflight = inflightRequests.get(cacheKey);
+  if (inflight) return inflight as Promise<PackageDetails>;
+
+  const promise = getPackageDetailsImpl(idLower, versionLower, cacheKey);
+  inflightRequests.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightRequests.delete(cacheKey);
+  }
+}
+
+async function getPackageDetailsImpl(
+  idLower: string,
+  versionLower: string,
+  cacheKey: string,
+): Promise<PackageDetails> {
   await discoverServices();
+
+  if (cacheOnlyMode) {
+    throw new Error(
+      `Package ${idLower}@${versionLower} not in cache (offline)`,
+    );
+  }
 
   if (!serviceUrls.registrationsBaseUrl) {
     throw new Error("Registration service not available");
@@ -323,7 +401,7 @@ export async function getPackageDetails(
   }
 
   if (!catalogEntry) {
-    throw new Error(`Package ${packageId} version ${version} not found`);
+    throw new Error(`Package ${idLower} version ${versionLower} not found`);
   }
 
   console.log("Found catalogEntry:", catalogEntry);
@@ -334,8 +412,8 @@ export async function getPackageDetails(
   console.log("Normalized dependencyGroups:", dependencyGroups);
 
   const details: PackageDetails = {
-    id: catalogEntry.id || packageId,
-    version: catalogEntry.version || version,
+    id: catalogEntry.id || idLower,
+    version: catalogEntry.version || versionLower,
     description: catalogEntry.description,
     summary: catalogEntry.summary,
     title: catalogEntry.title,

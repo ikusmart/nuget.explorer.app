@@ -17,6 +17,7 @@ export function MigrationPage() {
   const packages = useMigrationStore((s) => s.packages);
   const loadingProgress = useMigrationStore((s) => s.loadingProgress);
   const error = useMigrationStore((s) => s.error);
+  const warning = useMigrationStore((s) => s.warning);
 
   // Sync persisted server URL to API service on app load
   useEffect(() => {
@@ -54,20 +55,44 @@ export function MigrationPage() {
 
           {/* Loading Progress */}
           {loadingProgress && (
-            <div className="px-4 py-2 bg-muted border-b">
+            <div className="px-4 py-2 bg-muted border-b space-y-1">
               <div className="flex items-center gap-2">
                 <div className="flex-1 h-2 bg-muted-foreground/20 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-primary transition-all"
                     style={{
-                      width: `${(loadingProgress.current / loadingProgress.total) * 100}%`,
+                      width:
+                        loadingProgress.total > 0
+                          ? `${(loadingProgress.current / loadingProgress.total) * 100}%`
+                          : "0%",
                     }}
                   />
                 </div>
-                <span className="text-sm text-muted-foreground">
-                  Loading dependencies... {loadingProgress.current}/
-                  {loadingProgress.total}
+                <span className="text-sm text-muted-foreground whitespace-nowrap">
+                  {loadingProgress.total > 0
+                    ? `${loadingProgress.phase === "analyzing" ? "Analyzing" : "Loading"}: ${loadingProgress.current}/${loadingProgress.total}`
+                    : "Discovering..."}
+                  {loadingProgress.concurrency > 0 &&
+                    ` · ${loadingProgress.concurrency} active`}
                 </span>
+              </div>
+              <div className="text-xs text-muted-foreground truncate">
+                {loadingProgress.activePackages.length > 0 ? (
+                  <>
+                    Loading:{" "}
+                    {loadingProgress.activePackages.slice(0, 3).join(", ")}
+                    {loadingProgress.activePackages.length > 3 &&
+                      ` +${loadingProgress.activePackages.length - 3} more`}
+                  </>
+                ) : loadingProgress.total === 0 ? (
+                  "Discovering packages..."
+                ) : loadingProgress.phase === "analyzing" ? (
+                  "Analyzing framework compatibility..."
+                ) : loadingProgress.current < loadingProgress.total ? (
+                  "Processing cached data..."
+                ) : (
+                  "Finalizing..."
+                )}
               </div>
             </div>
           )}
@@ -76,6 +101,13 @@ export function MigrationPage() {
           {error && (
             <div className="px-4 py-2 bg-destructive/10 border-b text-destructive text-sm">
               Analysis failed: {error}
+            </div>
+          )}
+
+          {/* Warning (e.g. offline fallback) */}
+          {warning && !error && (
+            <div className="px-4 py-2 bg-amber-100 dark:bg-amber-950/30 border-b text-amber-800 dark:text-amber-300 text-sm">
+              {warning}
             </div>
           )}
 

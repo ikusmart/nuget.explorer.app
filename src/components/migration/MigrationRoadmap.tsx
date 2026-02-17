@@ -4,15 +4,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Download } from "lucide-react";
-import type { MigrationPackage } from "@/types/migration";
+import type {
+  MigrationPackage,
+  FrameworkCompatibility,
+  PerFrameworkVersion,
+} from "@/types/migration";
 
 interface DependencyInfo {
   id: string;
   version: string;
   latestVersion: string;
-  status: "ready" | "partial" | "blocked";
+  status: "ready" | "partial" | "blocked" | "split";
   targetFrameworks: string[];
   isCyclic?: boolean;
+  frameworkCompatibility?: FrameworkCompatibility[];
+  perFrameworkVersions?: PerFrameworkVersion[];
 }
 
 interface RootPackageView {
@@ -20,10 +26,12 @@ interface RootPackageView {
   version: string;
   latestVersion: string;
   targetFrameworks: string[];
-  status: "ready" | "partial" | "blocked";
+  status: "ready" | "partial" | "blocked" | "split";
   blockerCount: number;
   internalDependencies: DependencyInfo[];
   externalDependencies: DependencyInfo[];
+  frameworkCompatibility?: FrameworkCompatibility[];
+  perFrameworkVersions?: PerFrameworkVersion[];
 }
 
 interface MigrationStage {
@@ -43,8 +51,14 @@ function pickVersion(pkg: MigrationPackage, devFilter: string): string {
   return stable || pkg.availableVersions[0] || pkg.version;
 }
 
-const statusEmoji = (status: "ready" | "partial" | "blocked") =>
-  status === "ready" ? "🟢" : status === "partial" ? "🟡" : "🔴";
+const statusEmoji = (status: "ready" | "partial" | "blocked" | "split") =>
+  status === "ready"
+    ? "🟢"
+    : status === "partial"
+      ? "🟡"
+      : status === "split"
+        ? "🔵"
+        : "🔴";
 
 function formatVersion(current: string, latest: string): string {
   return current === latest ? latest : `${current} -> ${latest}`;
@@ -52,7 +66,7 @@ function formatVersion(current: string, latest: string): string {
 
 export function MigrationRoadmap() {
   const packages = useMigrationStore((s) => s.packages);
-  const targetFramework = useMigrationStore((s) => s.targetFramework);
+  const frameworkSelection = useMigrationStore((s) => s.frameworkSelection);
   const devVersionFilter = useMigrationStore((s) => s.devVersionFilter);
 
   // Build per-package views with DIRECT dependencies only, grouped into matryoshka stages
@@ -66,6 +80,8 @@ export function MigrationRoadmap() {
       status: d.status,
       targetFrameworks: d.targetFrameworks,
       isCyclic: d.isCyclic,
+      frameworkCompatibility: d.frameworkCompatibility,
+      perFrameworkVersions: d.perFrameworkVersions,
     });
 
     const views = packages.map((root) => {
@@ -88,6 +104,8 @@ export function MigrationRoadmap() {
           .filter((d) => !d.isInternal)
           .sort((a, b) => a.migrationOrder - b.migrationOrder)
           .map(toDependencyInfo),
+        frameworkCompatibility: root.frameworkCompatibility,
+        perFrameworkVersions: root.perFrameworkVersions,
       } satisfies RootPackageView;
     });
 
@@ -142,22 +160,30 @@ export function MigrationRoadmap() {
             remaining.delete(view.id.toLowerCase());
           }
         }
-        circular.sort(
-          (a, b) =>
+        circular.sort((a, b) => {
+          const splitA = a.status === "split" ? 1 : 0;
+          const splitB = b.status === "split" ? 1 : 0;
+          if (splitA !== splitB) return splitA - splitB;
+          return (
             a.internalDependencies.length +
             a.externalDependencies.length -
-            (b.internalDependencies.length + b.externalDependencies.length),
-        );
+            (b.internalDependencies.length + b.externalDependencies.length)
+          );
+        });
         result.push({ stage: stageNum, packages: circular });
         break;
       }
 
-      batch.sort(
-        (a, b) =>
+      batch.sort((a, b) => {
+        const splitA = a.status === "split" ? 1 : 0;
+        const splitB = b.status === "split" ? 1 : 0;
+        if (splitA !== splitB) return splitA - splitB;
+        return (
           a.internalDependencies.length +
           a.externalDependencies.length -
-          (b.internalDependencies.length + b.externalDependencies.length),
-      );
+          (b.internalDependencies.length + b.externalDependencies.length)
+        );
+      });
 
       result.push({ stage: stageNum, packages: batch });
       stageNum++;
@@ -173,7 +199,7 @@ export function MigrationRoadmap() {
 
   // Status counts across all unique packages
   const statusCounts = useMemo(() => {
-    const counts = { ready: 0, partial: 0, blocked: 0, total: 0 };
+    const counts = { ready: 0, partial: 0, blocked: 0, split: 0, total: 0 };
     const seen = new Set<string>();
 
     function count(pkgs: MigrationPackage[]) {
@@ -195,15 +221,32 @@ export function MigrationRoadmap() {
   const downloadPlan = () => {
     const lines: string[] = [];
 
-    const icon = (s: "ready" | "partial" | "blocked") =>
-      s === "ready" ? "🟢" : s === "partial" ? "🟡" : "🔴";
+    const icon = (s: "ready" | "partial" | "blocked" | "split") =>
+      s === "ready"
+        ? "🟢"
+        : s === "partial"
+          ? "🟡"
+          : s === "split"
+            ? "🔵"
+            : "🔴";
 
-    lines.push(`# Migration Plan to ${targetFramework}`);
-    lines.push("");
-    lines.push(`> Generated: ${new Date().toISOString()}`);
+    const currentFws = frameworkSelection.currentFrameworks;
+    const target = frameworkSelection.migrationTarget;
+
+    if (currentFws.length > 0) {
+      lines.push(`# Migration Plan: ${currentFws.join(", ")} → ${target}`);
+      lines.push("");
+      lines.push(`> Generated: ${new Date().toISOString()}`);
+      lines.push(`> Current frameworks: **${currentFws.join("**, **")}**`);
+      lines.push(`> Migration target: **${target}**`);
+    } else {
+      lines.push(`# Migration Plan to ${target}`);
+      lines.push("");
+      lines.push(`> Generated: ${new Date().toISOString()}`);
+    }
     lines.push("");
     lines.push(
-      `> 🟢 Ready: **${statusCounts.ready}** | 🟡 Partial: **${statusCounts.partial}** | 🔴 Blocked: **${statusCounts.blocked}** | Total: **${statusCounts.total}**`,
+      `> 🟢 Ready: **${statusCounts.ready}** | 🟡 Partial: **${statusCounts.partial}** | 🔴 Blocked: **${statusCounts.blocked}**${statusCounts.split > 0 ? ` | 🔵 Split: **${statusCounts.split}**` : ""} | Total: **${statusCounts.total}**`,
     );
     lines.push("");
 
@@ -222,6 +265,13 @@ export function MigrationRoadmap() {
         lines.push(
           `- [ ] ${icon(root.status)} **${globalIndex}. ${root.id}** \`${root.version}\`${tfm}`,
         );
+
+        if (root.status === "split" && root.perFrameworkVersions) {
+          lines.push(`  - **Framework versions:**`);
+          for (const pv of root.perFrameworkVersions) {
+            lines.push(`    - ${pv.framework}: \`${pv.version}\``);
+          }
+        }
 
         if (root.internalDependencies.length > 0) {
           lines.push(`  - Internal (${root.internalDependencies.length}):`);
@@ -263,6 +313,104 @@ export function MigrationRoadmap() {
       }
     }
 
+    if (currentFws.length > 0) {
+      lines.push("## Framework Compatibility Matrix");
+      lines.push("");
+      const allFws = [...new Set([...currentFws, target])];
+      const header = `| Package | ${allFws.join(" | ")} | Notes |`;
+      const sep = `|${Array(allFws.length + 2)
+        .fill("---------")
+        .join("|")}|`;
+      lines.push(header);
+      lines.push(sep);
+
+      for (const stage of stages) {
+        for (const root of stage.packages) {
+          const cells = allFws.map((fw) => {
+            if (root.perFrameworkVersions) {
+              const pv = root.perFrameworkVersions.find(
+                (v) => v.framework === fw,
+              );
+              if (pv) return pv.version === root.version ? "✓" : pv.version;
+            }
+            if (root.frameworkCompatibility) {
+              const fc = root.frameworkCompatibility.find(
+                (c) => c.framework === fw,
+              );
+              if (fc?.supported) {
+                if (fc.compatibilityMode === "netstandard") return "✓ (std)";
+                if (fc.compatibilityMode === "portable") return "✓ (any)";
+                return "✓";
+              }
+              return "✗";
+            }
+            return "-";
+          });
+          const note =
+            root.status === "split"
+              ? "Split"
+              : root.status === "blocked"
+                ? "Blocked"
+                : "";
+          lines.push(
+            `| ${root.id} \`${root.version}\` | ${cells.join(" | ")} | ${note} |`,
+          );
+        }
+      }
+      lines.push("");
+    }
+
+    // Multi-target Packages section
+    {
+      const multiTargetRows: string[] = [];
+
+      for (const stage of stages) {
+        for (const root of stage.packages) {
+          if (root.status === "split" && root.perFrameworkVersions) {
+            const details = root.perFrameworkVersions
+              .map((pv) => {
+                const fc = root.frameworkCompatibility?.find(
+                  (c) => c.framework === pv.framework,
+                );
+                const mode = fc?.compatibilityMode ?? "direct";
+                return `${pv.framework}: v${pv.version} (${mode})`;
+              })
+              .join(", ");
+            multiTargetRows.push(
+              `| ${root.id} \`${root.version}\` | Multi-target | ${details} |`,
+            );
+          } else if (
+            root.frameworkCompatibility?.some(
+              (c) => c.compatibilityMode === "netstandard",
+            )
+          ) {
+            const stdFws = root.frameworkCompatibility
+              .filter((c) => c.compatibilityMode === "netstandard")
+              .map((c) => c.framework)
+              .join(", ");
+            multiTargetRows.push(
+              `| ${root.id} \`${root.version}\` | via netstandard | Works via netstandard — no native support for ${stdFws} |`,
+            );
+          }
+        }
+      }
+
+      if (multiTargetRows.length > 0) {
+        lines.push("## Multi-target Packages");
+        lines.push("");
+        lines.push(
+          "Packages below require multi-targeting or use netstandard compatibility:",
+        );
+        lines.push("");
+        lines.push("| Package | Migration Type | Details |");
+        lines.push("|---------|---------------|---------|");
+        for (const row of multiTargetRows) {
+          lines.push(row);
+        }
+        lines.push("");
+      }
+    }
+
     lines.push("---");
     lines.push("");
     lines.push("## Instructions");
@@ -274,13 +422,21 @@ export function MigrationRoadmap() {
       "4. 🔴 Blocked packages require external updates or replacements",
     );
     lines.push("5. Re-run the analysis after completing each stage");
+    if (statusCounts.split > 0) {
+      lines.push(
+        "6. 🔵 Split packages need conditional PackageReference per TFM:",
+      );
+      lines.push(
+        "   `<PackageReference Condition=\"'$(TargetFramework)'=='net6.0'\" ... />`",
+      );
+    }
 
     const content = lines.join("\n");
     const blob = new Blob([content], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `migration-plan-${targetFramework}-${new Date().toISOString().split("T")[0]}.md`;
+    a.download = `migration-plan-${target}-${new Date().toISOString().split("T")[0]}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -291,12 +447,17 @@ export function MigrationRoadmap() {
 
   let globalIndex = 0;
 
+  const currentFws = frameworkSelection.currentFrameworks;
+  const target = frameworkSelection.migrationTarget;
+  const headerTitle =
+    currentFws.length > 0
+      ? `Migration Roadmap: ${currentFws.join(", ")} → ${target}`
+      : `Migration Roadmap to ${target}`;
+
   return (
     <Card className="m-4 p-4">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold">
-          Migration Roadmap to {targetFramework}
-        </h3>
+        <h3 className="text-lg font-semibold">{headerTitle}</h3>
         <Button variant="outline" size="sm" onClick={downloadPlan}>
           <Download className="h-4 w-4 mr-1" />
           Download Plan
@@ -326,6 +487,15 @@ export function MigrationRoadmap() {
             <div className="text-sm text-muted-foreground">Blocked</div>
           </div>
         </div>
+        {statusCounts.split > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">🔵</span>
+            <div>
+              <div className="text-2xl font-bold">{statusCounts.split}</div>
+              <div className="text-sm text-muted-foreground">Split</div>
+            </div>
+          </div>
+        )}
         <div className="flex items-center gap-2 ml-4 pl-4 border-l">
           <div>
             <div className="text-2xl font-bold">{statusCounts.total}</div>
@@ -373,6 +543,57 @@ export function MigrationRoadmap() {
                         #{idx}
                       </Badge>
                     </div>
+
+                    {/* Multi-target info box */}
+                    {root.status === "split" &&
+                      root.perFrameworkVersions &&
+                      root.perFrameworkVersions.length > 0 && (
+                        <div className="mt-2 p-2 bg-blue-50 dark:bg-blue-950/20 rounded border border-blue-200 dark:border-blue-800">
+                          <div className="text-xs font-medium text-blue-700 dark:text-blue-300 mb-1">
+                            Multi-target — different versions per framework:
+                          </div>
+                          <div className="space-y-0.5">
+                            {root.perFrameworkVersions.map((pv) => {
+                              const fc = root.frameworkCompatibility?.find(
+                                (c) => c.framework === pv.framework,
+                              );
+                              const mode = fc?.compatibilityMode ?? "direct";
+                              return (
+                                <div
+                                  key={pv.framework}
+                                  className="flex items-center gap-2 text-xs font-mono"
+                                >
+                                  <span className="w-20 text-right text-muted-foreground">
+                                    {pv.framework}:
+                                  </span>
+                                  <code>{pv.version}</code>
+                                  <span className="text-muted-foreground">
+                                    ({mode})
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                    {/* Netstandard compatibility info box */}
+                    {root.status !== "split" &&
+                      root.frameworkCompatibility?.some(
+                        (c) => c.compatibilityMode === "netstandard",
+                      ) && (
+                        <div className="mt-2 p-2 bg-emerald-50 dark:bg-emerald-950/20 rounded border border-emerald-200 dark:border-emerald-800">
+                          <div className="text-xs text-emerald-700 dark:text-emerald-300">
+                            Compatible via netstandard — works on all target
+                            frameworks, but not a native .NET{" "}
+                            {frameworkSelection.migrationTarget
+                              .replace("net", "")
+                              .replace(".0", "")}{" "}
+                            build. Consider upgrading to a version with native
+                            support if available.
+                          </div>
+                        </div>
+                      )}
 
                     {/* Internal dependencies */}
                     {root.internalDependencies.length > 0 && (

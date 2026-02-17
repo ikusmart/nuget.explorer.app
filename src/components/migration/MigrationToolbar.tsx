@@ -8,6 +8,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useMigrationStore } from "@/stores/migration-store";
 import { useServerStore } from "@/stores/server-store";
 import { TARGET_FRAMEWORKS, type TargetFramework } from "@/types/migration";
@@ -20,18 +26,28 @@ import {
   readCacheImportFile,
   saveDefaultSnapshot,
 } from "@/services/nuget-api";
-import { Search, RotateCcw, Trash2, Download, Upload } from "lucide-react";
+import {
+  Search,
+  RotateCcw,
+  Trash2,
+  Download,
+  Upload,
+  ChevronDown,
+} from "lucide-react";
 
 export function MigrationToolbar() {
   const searchPrefix = useMigrationStore((s) => s.searchPrefix);
   const internalMask = useMigrationStore((s) => s.internalMask);
-  const targetFramework = useMigrationStore((s) => s.targetFramework);
+  const frameworkSelection = useMigrationStore((s) => s.frameworkSelection);
   const devVersionFilter = useMigrationStore((s) => s.devVersionFilter);
   const loadingProgress = useMigrationStore((s) => s.loadingProgress);
 
   const setSearchPrefix = useMigrationStore((s) => s.setSearchPrefix);
   const setInternalMask = useMigrationStore((s) => s.setInternalMask);
-  const setTargetFramework = useMigrationStore((s) => s.setTargetFramework);
+  const setMigrationTarget = useMigrationStore((s) => s.setMigrationTarget);
+  const toggleCurrentFramework = useMigrationStore(
+    (s) => s.toggleCurrentFramework,
+  );
   const setDevVersionFilter = useMigrationStore((s) => s.setDevVersionFilter);
   const startAnalysis = useMigrationStore((s) => s.startAnalysis);
   const reset = useMigrationStore((s) => s.reset);
@@ -92,6 +108,14 @@ export function MigrationToolbar() {
     }
   };
 
+  // Format current frameworks button text
+  const currentFrameworksText =
+    frameworkSelection.currentFrameworks.length > 0
+      ? frameworkSelection.currentFrameworks
+          .map((tfm) => TARGET_FRAMEWORKS.find((t) => t.value === tfm)?.label)
+          .join(", ")
+      : "Optional";
+
   return (
     <div className="border-b px-4 py-3 flex items-center gap-4 flex-wrap">
       {/* Search Prefix */}
@@ -123,14 +147,62 @@ export function MigrationToolbar() {
         />
       </div>
 
-      {/* Target Framework */}
+      {/* Framework Selection */}
       <div className="flex items-center gap-2">
         <label className="text-sm font-medium whitespace-nowrap">
-          Target TFM:
+          Current TFMs:
+        </label>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              variant="outline"
+              className="w-48 justify-between"
+              disabled={isLoading}
+            >
+              <span className="truncate">{currentFrameworksText}</span>
+              <ChevronDown className="h-4 w-4 ml-2 flex-shrink-0" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-56 p-3">
+            <div className="space-y-2">
+              {TARGET_FRAMEWORKS.map((tfm) => {
+                const isMigrationTarget =
+                  tfm.value === frameworkSelection.migrationTarget;
+                const isSelected =
+                  frameworkSelection.currentFrameworks.includes(tfm.value);
+                return (
+                  <div key={tfm.value} className="flex items-center gap-2">
+                    <Checkbox
+                      id={`current-${tfm.value}`}
+                      checked={isSelected}
+                      disabled={isMigrationTarget || isLoading}
+                      onCheckedChange={() => toggleCurrentFramework(tfm.value)}
+                    />
+                    <label
+                      htmlFor={`current-${tfm.value}`}
+                      className={`text-sm cursor-pointer ${
+                        isMigrationTarget
+                          ? "text-muted-foreground"
+                          : "text-foreground"
+                      }`}
+                    >
+                      {tfm.label}
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+          </PopoverContent>
+        </Popover>
+
+        <span className="text-muted-foreground">→</span>
+
+        <label className="text-sm font-medium whitespace-nowrap">
+          Migrate to:
         </label>
         <Select
-          value={targetFramework}
-          onValueChange={(v) => setTargetFramework(v as TargetFramework)}
+          value={frameworkSelection.migrationTarget}
+          onValueChange={(v) => setMigrationTarget(v as TargetFramework)}
           disabled={isLoading}
         >
           <SelectTrigger className="w-32">

@@ -2,6 +2,8 @@ import type {
   MigrationPackage,
   VersionConflict,
   TargetFramework,
+  FrameworkCompatibility,
+  PerFrameworkVersion,
 } from "@/types/migration";
 import {
   searchPackages,
@@ -9,6 +11,39 @@ import {
   getPackageDetails,
 } from "./nuget-api";
 import { cacheGet, cacheSet, getCacheServiceStats } from "./cache-service";
+
+/** Progress info reported during dependency tree loading and analysis */
+export interface LoadingProgressInfo {
+  current: number;
+  total: number;
+  activePackages: string[];
+  concurrency: number;
+  phase: "loading" | "analyzing";
+}
+
+/** Simple concurrency limiter for parallel HTTP requests */
+function createSemaphore(concurrency: number) {
+  let running = 0;
+  const queue: Array<() => void> = [];
+
+  function acquire(): Promise<void> {
+    if (running < concurrency) {
+      running++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => queue.push(resolve));
+  }
+
+  function release(): void {
+    running--;
+    if (queue.length > 0) {
+      running++;
+      queue.shift()!();
+    }
+  }
+
+  return { acquire, release, getRunning: () => running };
+}
 
 /**
  * Cache for loaded package data
@@ -81,38 +116,53 @@ export async function loadDependencyTree(
   packageIds: string[],
   internalMask: string,
   devVersionFilter: string,
-  onProgress?: (current: number, total: number) => void,
+  onProgress?: (info: LoadingProgressInfo) => void,
 ): Promise<MigrationPackage[]> {
   const visited = new Map<string, MigrationPackage>();
-  const inProgress = new Set<string>();
+  const loadingPromises = new Map<string, Promise<MigrationPackage | null>>();
   let processedCount = 0;
-  let totalCount = packageIds.length;
+  let totalCount = 0;
+
+  const semaphore = createSemaphore(6);
+  const activePackages = new Set<string>();
 
   const internalPattern = internalMask
     ? new RegExp(`^${internalMask.replace(/\*/g, ".*")}`, "i")
     : null;
 
+  function reportProgress() {
+    if (onProgress) {
+      onProgress({
+        current: processedCount,
+        total: totalCount,
+        activePackages: [...activePackages],
+        concurrency: semaphore.getRunning(),
+        phase: "loading",
+      });
+    }
+  }
+
   async function loadPackage(
     packageId: string,
     depth: number,
     requestedVersion?: string,
+    ancestors?: Set<string>,
   ): Promise<MigrationPackage | null> {
     const cacheKey = packageId.toLowerCase();
 
-    // Check if already loaded - return a shared reference
+    // Already fully loaded — return shared reference
     if (visited.has(cacheKey)) {
       const existing = visited.get(cacheKey)!;
-      // Return a shallow reference marked as shared (no dependencies to avoid duplication)
       return {
         ...existing,
         depth,
-        dependencies: [], // Don't duplicate the subtree
+        dependencies: [],
         isSharedReference: true,
       };
     }
 
-    // Cycle detection
-    if (inProgress.has(cacheKey)) {
+    // Cycle detection — this package is a direct ancestor in our call chain
+    if (ancestors?.has(cacheKey)) {
       return {
         id: packageId,
         version: requestedVersion || "unknown",
@@ -128,25 +178,65 @@ export async function loadDependencyTree(
       };
     }
 
-    inProgress.add(cacheKey);
+    // Currently loading by another parallel branch — wait for it
+    const inflight = loadingPromises.get(cacheKey);
+    if (inflight) {
+      const result = await inflight;
+      if (result) {
+        return { ...result, depth, dependencies: [], isSharedReference: true };
+      }
+      return null;
+    }
 
+    // Start loading — register promise for dedup
+    const myAncestors = new Set(ancestors);
+    myAncestors.add(cacheKey);
+
+    const promise = loadPackageImpl(
+      packageId,
+      cacheKey,
+      depth,
+      requestedVersion,
+      myAncestors,
+    );
+    loadingPromises.set(cacheKey, promise);
+    totalCount++;
+    reportProgress();
     try {
-      const cachedData = cacheGet<CachedPackageData>(`migration:${cacheKey}`);
-      const useCache = !!cachedData;
+      return await promise;
+    } finally {
+      loadingPromises.delete(cacheKey);
+    }
+  }
 
-      let version: string;
-      let versions: string[];
-      let targetFrameworks: string[];
-      let dependencyIds: Array<{ id: string }>;
+  async function loadPackageImpl(
+    packageId: string,
+    cacheKey: string,
+    depth: number,
+    requestedVersion: string | undefined,
+    ancestors: Set<string>,
+  ): Promise<MigrationPackage | null> {
+    const cachedData = cacheGet<CachedPackageData>(`migration:${cacheKey}`);
+    const useCache = !!cachedData;
 
-      if (useCache) {
-        // Use cached metadata
-        version = cachedData.version;
-        versions = cachedData.availableVersions;
-        targetFrameworks = cachedData.targetFrameworks;
-        dependencyIds = cachedData.dependencyIds;
-      } else {
-        // Fetch from API
+    let version: string;
+    let versions: string[];
+    let targetFrameworks: string[];
+    let dependencyIds: Array<{ id: string }>;
+
+    if (useCache) {
+      // Use cached metadata
+      version = cachedData.version;
+      versions = cachedData.availableVersions;
+      targetFrameworks = cachedData.targetFrameworks;
+      dependencyIds = cachedData.dependencyIds;
+    } else {
+      // Fetch from API — acquire semaphore to limit concurrency
+      await semaphore.acquire();
+      activePackages.add(packageId);
+      reportProgress();
+
+      try {
         try {
           versions = await getPackageVersions(packageId);
         } catch {
@@ -212,105 +302,215 @@ export async function loadDependencyTree(
           targetFrameworks,
           dependencyIds,
         } satisfies CachedPackageData);
+      } finally {
+        activePackages.delete(packageId);
+        semaphore.release();
       }
-
-      // Create package entry
-      const pkg: MigrationPackage = {
-        id: packageId,
-        version,
-        availableVersions: versions.slice(0, 10),
-        isInternal: internalPattern?.test(packageId) || false,
-        depth,
-        targetFrameworks,
-        dependencies: [],
-        status: "ready",
-        blockerCount: 0,
-        migrationOrder: -1,
-      };
-
-      visited.set(cacheKey, pkg);
-
-      // Update progress
-      processedCount++;
-      if (onProgress) {
-        onProgress(processedCount, totalCount);
-      }
-
-      // Update total count for dependencies not yet visited
-      for (const dep of dependencyIds) {
-        if (
-          !visited.has(dep.id.toLowerCase()) &&
-          !inProgress.has(dep.id.toLowerCase())
-        ) {
-          totalCount++;
-        }
-      }
-
-      // Load each dependency recursively
-      for (const dep of dependencyIds) {
-        const depKey = dep.id.toLowerCase();
-        if (pkg.dependencies.some((d) => d.id.toLowerCase() === depKey)) {
-          continue;
-        }
-
-        const depPackage = await loadPackage(dep.id, depth + 1);
-        if (depPackage) {
-          pkg.dependencies.push(depPackage);
-        }
-      }
-
-      return pkg;
-    } finally {
-      inProgress.delete(cacheKey);
     }
+
+    // Create package entry
+    const pkg: MigrationPackage = {
+      id: packageId,
+      version,
+      availableVersions: versions.slice(0, 10),
+      isInternal: internalPattern?.test(packageId) || false,
+      depth,
+      targetFrameworks,
+      dependencies: [],
+      status: "ready",
+      blockerCount: 0,
+      migrationOrder: -1,
+    };
+
+    visited.set(cacheKey, pkg);
+
+    const uniqueDeps = dependencyIds.filter(
+      (dep) =>
+        !pkg.dependencies.some(
+          (d) => d.id.toLowerCase() === dep.id.toLowerCase(),
+        ),
+    );
+
+    // Start dep loading — .map() calls each loadPackage synchronously
+    // up to its first await, so all deps self-register in totalCount
+    // BEFORE we increment processedCount below
+    const depPromise = Promise.all(
+      uniqueDeps.map((dep) =>
+        loadPackage(dep.id, depth + 1, undefined, ancestors),
+      ),
+    );
+
+    // NOW count this package as processed — deps already registered
+    processedCount++;
+    reportProgress();
+
+    const depResults = await depPromise;
+    for (const depPkg of depResults) {
+      if (depPkg) pkg.dependencies.push(depPkg);
+    }
+
+    return pkg;
   }
 
-  // Load all root packages
+  // Load all root packages in parallel — semaphore limits HTTP concurrency
+  const rootResults = await Promise.all(
+    packageIds.map((id) => loadPackage(id, 0)),
+  );
   const results: MigrationPackage[] = [];
-  for (const packageId of packageIds) {
-    const pkg = await loadPackage(packageId, 0);
-    if (pkg) {
-      results.push(pkg);
-    }
+  for (const pkg of rootResults) {
+    if (pkg) results.push(pkg);
   }
 
   return results;
 }
 
 /**
- * Check if a target framework is supported by the package
+ * Check if a package TFM is in the direct runtime compatibility chain for a target.
+ * The NuGet precedence chain:
+ *   net10.0 > net9.0 > ... > net5.0 > netcoreapp3.1 > ... > netcoreapp1.0
+ * netcoreapp is the old name for the same runtime, renamed to net5.0+.
+ */
+function isInDirectChain(
+  pkgTfm: { family: string; version: number },
+  target: { family: string; version: number },
+): boolean {
+  if (pkgTfm.family === target.family && pkgTfm.version <= target.version) {
+    return true;
+  }
+  // Cross-family: netcoreapp is compatible with net5.0+ (same runtime lineage)
+  if (
+    pkgTfm.family === "netcoreapp" &&
+    target.family === "net" &&
+    target.version >= 5
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Compare two TFM matches for precedence (higher = closer to target = better).
+ * net* versions are always higher precedence than netcoreapp*.
+ */
+function comparePrecedence(
+  a: { tfm: string; version: number },
+  b: { tfm: string; version: number },
+): number {
+  const aFamily = a.tfm.startsWith("netcoreapp") ? "netcoreapp" : "net";
+  const bFamily = b.tfm.startsWith("netcoreapp") ? "netcoreapp" : "net";
+  if (aFamily !== bFamily) return aFamily === "net" ? 1 : -1;
+  return a.version - b.version;
+}
+
+/**
+ * Detailed framework compatibility check.
+ * Scans ALL package TFMs to find the best match, applying NuGet precedence:
+ *   1. Direct (net* or netcoreapp* in the target's fallback chain)
+ *   2. netstandard (any version — net5.0+ implements netstandard2.1)
+ *   3. none
+ */
+function isFrameworkSupportedDetailed(
+  packageFrameworks: string[],
+  targetFramework: TargetFramework,
+): FrameworkCompatibility {
+  if (packageFrameworks.length === 0) {
+    return {
+      framework: targetFramework,
+      supported: true,
+      compatibilityMode: "portable",
+    };
+  }
+
+  const target = parseFrameworkVersion(targetFramework);
+  if (!target) {
+    return {
+      framework: targetFramework,
+      supported: false,
+      compatibilityMode: "none",
+    };
+  }
+
+  let bestDirect: { tfm: string; version: number } | null = null;
+  let hasNetstandard = false;
+
+  for (const tfm of packageFrameworks) {
+    const parsed = parseFrameworkVersion(tfm);
+    if (!parsed) continue;
+
+    if (parsed.family === "netstandard") {
+      // All netstandard versions are compatible with net5.0+
+      if (target.family === "net" || target.family === "netcoreapp") {
+        hasNetstandard = true;
+      }
+      continue;
+    }
+
+    if (isInDirectChain(parsed, target)) {
+      const candidate = { tfm, version: parsed.version };
+      if (!bestDirect || comparePrecedence(candidate, bestDirect) > 0) {
+        bestDirect = candidate;
+      }
+    }
+  }
+
+  // Direct takes priority over netstandard
+  if (bestDirect) {
+    return {
+      framework: targetFramework,
+      supported: true,
+      compatibilityMode: "direct",
+    };
+  }
+  if (hasNetstandard) {
+    return {
+      framework: targetFramework,
+      supported: true,
+      compatibilityMode: "netstandard",
+    };
+  }
+
+  return {
+    framework: targetFramework,
+    supported: false,
+    compatibilityMode: "none",
+  };
+}
+
+/**
+ * Simple boolean check — thin wrapper over isFrameworkSupportedDetailed.
  */
 function isFrameworkSupported(
   packageFrameworks: string[],
   targetFramework: TargetFramework,
 ): boolean {
-  if (packageFrameworks.length === 0) {
-    // No framework-specific dependencies means it's likely a portable library
-    return true;
-  }
+  return isFrameworkSupportedDetailed(packageFrameworks, targetFramework)
+    .supported;
+}
 
-  const targetVersion = parseFrameworkVersion(targetFramework);
+/**
+ * For a split package, find the newest version that supports a given framework.
+ * Iterates available versions (already limited to 10 in cache) newest-to-oldest.
+ */
+async function findCompatibleVersionForFramework(
+  packageId: string,
+  availableVersions: string[],
+  targetFramework: TargetFramework,
+): Promise<{ version: string; frameworks: string[] } | null> {
+  for (const version of availableVersions) {
+    try {
+      const details = await getPackageDetails(packageId, version);
+      const frameworks = (details.dependencyGroups || [])
+        .map((g) => g.targetFramework)
+        .filter((tfm): tfm is string => !!tfm);
 
-  for (const tfm of packageFrameworks) {
-    const version = parseFrameworkVersion(tfm);
-    if (version === null) continue;
-
-    // Check if target is compatible with package's supported framework
-    // A package built for net6.0 can be used by net8.0, net9.0, etc.
-    if (
-      version.family === targetVersion?.family &&
-      version.version <= (targetVersion?.version || 0)
-    ) {
-      return true;
+      if (isFrameworkSupported(frameworks, targetFramework)) {
+        return { version, frameworks };
+      }
+    } catch {
+      continue;
     }
-
-    // netstandard2.0/2.1 is compatible with all modern .NET
-    if (tfm.startsWith("netstandard")) {
-      return true;
-    }
   }
-
-  return false;
+  return null;
 }
 
 /**
@@ -350,20 +550,73 @@ function parseFrameworkVersion(
 }
 
 /**
- * Analyze all packages for framework support
+ * Analyze all packages for framework support.
+ * When currentFrameworks is provided, checks compatibility across ALL frameworks
+ * and detects "split" packages that need different versions per TFM.
  */
-export function analyzeAllPackages(
+export async function analyzeAllPackages(
   packages: MigrationPackage[],
   targetFramework: TargetFramework,
-): MigrationPackage[] {
-  function analyzePackage(pkg: MigrationPackage): MigrationPackage {
-    // Analyze dependencies first (bottom-up)
-    const analyzedDeps = pkg.dependencies.map(analyzePackage);
+  currentFrameworks?: TargetFramework[],
+  onProgress?: (info: LoadingProgressInfo) => void,
+): Promise<MigrationPackage[]> {
+  const allFrameworks = [
+    ...new Set([targetFramework, ...(currentFrameworks || [])]),
+  ];
+  const isMultiTfm = allFrameworks.length > 1;
 
-    // Check if this package supports the target framework
-    const supportsTarget = isFrameworkSupported(
-      pkg.targetFrameworks,
-      targetFramework,
+  // Count unique packages in tree for progress reporting
+  const uniqueIds = new Set<string>();
+  function countPackages(pkgs: MigrationPackage[]) {
+    for (const p of pkgs) {
+      const key = p.id.toLowerCase();
+      if (!uniqueIds.has(key)) {
+        uniqueIds.add(key);
+        countPackages(p.dependencies);
+      }
+    }
+  }
+  countPackages(packages);
+
+  let analyzed = 0;
+  const analyzeCache = new Map<string, Promise<MigrationPackage>>();
+
+  function reportAnalyzeProgress() {
+    onProgress?.({
+      current: analyzed,
+      total: uniqueIds.size,
+      activePackages: [],
+      concurrency: 0,
+      phase: "analyzing",
+    });
+  }
+
+  async function analyzePackage(
+    pkg: MigrationPackage,
+  ): Promise<MigrationPackage> {
+    const key = pkg.id.toLowerCase();
+    const existing = analyzeCache.get(key);
+    if (existing) {
+      const cached = await existing;
+      return {
+        ...cached,
+        depth: pkg.depth,
+        dependencies: [],
+        isSharedReference: true,
+      };
+    }
+
+    const promise = analyzePackageImpl(pkg);
+    analyzeCache.set(key, promise);
+    return promise;
+  }
+
+  async function analyzePackageImpl(
+    pkg: MigrationPackage,
+  ): Promise<MigrationPackage> {
+    // Analyze dependencies first (bottom-up)
+    const analyzedDeps = await Promise.all(
+      pkg.dependencies.map(analyzePackage),
     );
 
     // Count blocked dependencies
@@ -371,25 +624,88 @@ export function analyzeAllPackages(
       (d) => d.status === "blocked",
     ).length;
 
-    // Determine status
-    let status: MigrationPackage["status"];
-    if (!supportsTarget || pkg.isCyclic) {
-      status = "blocked";
-    } else if (blockerCount > 0) {
-      status = "partial";
-    } else {
-      status = "ready";
+    if (pkg.isCyclic) {
+      analyzed++;
+      reportAnalyzeProgress();
+      return {
+        ...pkg,
+        dependencies: analyzedDeps,
+        status: "blocked",
+        blockerCount,
+      };
     }
+
+    // Check compatibility for each required framework
+    const frameworkCompatibility = allFrameworks.map((fw) =>
+      isFrameworkSupportedDetailed(pkg.targetFrameworks, fw),
+    );
+
+    const allSupported = frameworkCompatibility.every((fc) => fc.supported);
+    const noneSupported = frameworkCompatibility.every((fc) => !fc.supported);
+    const someSupported = !allSupported && !noneSupported;
+
+    let status: MigrationPackage["status"];
+    let perFrameworkVersions: PerFrameworkVersion[] | undefined;
+
+    if (noneSupported) {
+      status = "blocked";
+    } else if (allSupported) {
+      status = blockerCount > 0 ? "partial" : "ready";
+    } else if (someSupported && isMultiTfm) {
+      // Some frameworks supported, some not — try to find versions for unsupported ones
+      const unsupported = frameworkCompatibility.filter((fc) => !fc.supported);
+      const supported = frameworkCompatibility.filter((fc) => fc.supported);
+
+      const versions: PerFrameworkVersion[] = [];
+
+      // Add current version for supported frameworks
+      for (const fc of supported) {
+        versions.push({ framework: fc.framework, version: pkg.version });
+      }
+
+      // Search older versions for unsupported frameworks
+      let allFound = true;
+      for (const fc of unsupported) {
+        const found = await findCompatibleVersionForFramework(
+          pkg.id,
+          pkg.availableVersions,
+          fc.framework,
+        );
+        if (found) {
+          versions.push({ framework: fc.framework, version: found.version });
+        } else {
+          allFound = false;
+          break;
+        }
+      }
+
+      if (allFound) {
+        status = "split";
+        perFrameworkVersions = versions;
+      } else {
+        status = "blocked";
+      }
+    } else {
+      // Single-TFM mode, not supported
+      status = "blocked";
+    }
+
+    analyzed++;
+    reportAnalyzeProgress();
 
     return {
       ...pkg,
       dependencies: analyzedDeps,
       status,
       blockerCount,
+      frameworkCompatibility,
+      perFrameworkVersions,
     };
   }
 
-  return packages.map(analyzePackage);
+  reportAnalyzeProgress();
+  const results = await Promise.all(packages.map(analyzePackage));
+  return results;
 }
 
 /**
