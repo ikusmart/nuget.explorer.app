@@ -10,6 +10,7 @@ import { setServiceIndexUrl, setCacheOnlyMode } from "@/services/nuget-api";
 import { Button } from "@/components/ui/button";
 import { GitBranch } from "lucide-react";
 import { ServerSelector } from "@/components/layout/ServerSelector";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 
 export function GraphPage() {
   const serverUrl = useServerStore((state) => state.serverUrl);
@@ -46,7 +47,10 @@ export function GraphPage() {
               <Link to="/graph">Dependency Graph</Link>
             </Button>
           </nav>
-          <ServerSelector />
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <ServerSelector />
+          </div>
         </header>
 
         {/* Main Content */}

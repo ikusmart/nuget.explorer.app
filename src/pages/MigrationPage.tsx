@@ -6,6 +6,7 @@ import { setServiceIndexUrl, setCacheOnlyMode } from "@/services/nuget-api";
 import { Button } from "@/components/ui/button";
 import { Network } from "lucide-react";
 import { ServerSelector } from "@/components/layout/ServerSelector";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { MigrationToolbar } from "@/components/migration/MigrationToolbar";
 import { MigrationTable } from "@/components/migration/MigrationTable";
 import { MigrationRoadmap } from "@/components/migration/MigrationRoadmap";
@@ -45,7 +46,10 @@ export function MigrationPage() {
               </Link>
             </Button>
           </nav>
-          <ServerSelector />
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <ServerSelector />
+          </div>
         </header>
 
         {/* Main Content */}
